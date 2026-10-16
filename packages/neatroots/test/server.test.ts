@@ -220,6 +220,32 @@ describe("server", () => {
     expect(tb.roots.config.retention).toEqual({ days: 30, maxGb: 2.5 });
   });
 
+  it("validates redact_patterns as an array of regex strings and exposes them in status", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const save = (b: unknown) => fetch(`${tb.url}/api/settings`, { method: "POST", headers, body: JSON.stringify(b) });
+
+    // Non-array and invalid types reject with 400
+    for (const bad of ["ab", 123, {}, [123], ["[invalid regex"]]) {
+      const r = await save({ redact_patterns: bad });
+      expect(r.status, JSON.stringify(bad)).toBe(400);
+    }
+
+    // Valid array of regex strings saves and is exposed in /api/status
+    const ok = await save({ redact_patterns: ["cust_[0-9]+", "secret_.*"] });
+    expect(ok.status).toBe(200);
+    expect(tb.roots.config.cloud.redactPatterns).toEqual(["cust_[0-9]+", "secret_.*"]);
+
+    const statusRes = await fetch(`${tb.url}/api/status`, { headers: { origin: tb.url.replace("127.0.0.1", "localhost") } });
+    const statusData = (await statusRes.json()) as { cloud: { redact_patterns?: string[] } };
+    expect(statusData.cloud.redact_patterns).toEqual(["cust_[0-9]+", "secret_.*"]);
+
+    // Can clear stored patterns with an empty array
+    const clear = await save({ redact_patterns: [] });
+    expect(clear.status).toBe(200);
+    expect(tb.roots.config.cloud.redactPatterns).toEqual([]);
+  });
+
   it("clamps the findings list limit instead of failing on a bad value", async () => {
     const tb = await served();
     const { t, root, batches } = sampleRun();

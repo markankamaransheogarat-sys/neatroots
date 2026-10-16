@@ -144,7 +144,7 @@ export function mountApi(app: Hono, roots: Roots): void {
       tier: { ...tier, platform: `${os.platform()} ${os.arch()}` },
       steering: { enabled: roots.config.steering.enabled, hooks_connected: roots.steering.listeners },
       mcp: { last_seen_ms: roots.mcpSeenMs },
-      cloud: { endpoint: roots.relay.endpoint(), has_key: !!(await getCloudKey()), has_token: !!(await getCloudToken()), project_id: roots.config.cloud.projectId ?? null },
+      cloud: { endpoint: roots.relay.endpoint(), has_key: !!(await getCloudKey()), has_token: !!(await getCloudToken()), project_id: roots.config.cloud.projectId ?? null, redact_patterns: roots.config.cloud.redactPatterns ?? [] },
       classifier: {
         laya: { ...roots.laya.state, consent: roots.config.classifier.laya.consent ?? null },
         trust: Object.entries(roots.decisions.trust.all())
@@ -312,7 +312,10 @@ export function mountApi(app: Hono, roots: Roots): void {
       if (!allowedEndpoint(b.cloud_endpoint)) return err(c, 400, "cloud endpoint must be an https://*.neatlogs.com URL (or localhost for testing)");
       roots.config.cloud.endpoint = b.cloud_endpoint;
     }
-    if (b.redact_patterns) {
+    if (b.redact_patterns !== undefined) {
+      if (!Array.isArray(b.redact_patterns) || b.redact_patterns.some((p) => typeof p !== "string")) {
+        return err(c, 400, "redact_patterns must be an array of regex strings");
+      }
       for (const p of b.redact_patterns) {
         try {
           new RegExp(p);
