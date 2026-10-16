@@ -290,4 +290,54 @@ describe("server", () => {
     expect(msg).toMatch(/Settings → Models|neatroots llm use/);
     expect(msg).not.toMatch(/fetch failed/);
   });
+
+  it("enforces decompression limits and asynchronous handling for magic-byte sniffed gzip payloads", async () => {
+    const tb = await served();
+    const { t, batches } = sampleRun();
+
+    // 1. Valid magic-byte gzipped payload without content-encoding header succeeds
+    const validGz = zlib.gzipSync(encodeTraceRequest(batches));
+    const validRes = await fetch(`${tb.url}/v1/traces`, {
+      method: "POST",
+      headers: { "content-type": "application/x-protobuf" },
+      body: validGz,
+    });
+    expect(validRes.status).toBe(200);
+    expect(tb.roots.store.getRun(t)?.span_count).toBe(3);
+
+    // 2. Magic-byte gzip bomb (exceeding 256MB decompressed limit) is rejected with 400, not allocating unbounded memory
+    const bomb = zlib.gzipSync(Buffer.alloc(270 * 1024 * 1024), { level: 9 });
+    const bombRes = await fetch(`${tb.url}/v1/traces`, {
+      method: "POST",
+      headers: { "content-type": "application/x-protobuf" },
+      body: bomb,
+    });
+    expect(bombRes.status).toBe(400);
+    const body = (await bombRes.json()) as { code: number; message: string };
+    expect(body.code).toBe(3);
+    expect(body.message).toMatch(/invalid OTLP payload/);
+
+    // 3. Oversized raw body (> 64MB MAX_BODY) is rejected with 413
+    const oversizedStatus = await new Promise<number>((resolve) => {
+      const u = new URL(`${tb.url}/v1/traces`);
+      const req = http.request(
+        {
+          hostname: u.hostname,
+          port: u.port,
+          path: u.pathname,
+          method: "POST",
+          headers: {
+            "content-type": "application/x-protobuf",
+            "content-length": String(70 * 1024 * 1024),
+          },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      req.end("short");
+    });
+    expect(oversizedStatus).toBe(413);
+  });
 });

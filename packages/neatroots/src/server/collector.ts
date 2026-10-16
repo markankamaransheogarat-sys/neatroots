@@ -1,3 +1,4 @@
+import { promisify } from "node:util";
 import zlib from "node:zlib";
 import type { Context, Hono } from "hono";
 import {
@@ -13,17 +14,34 @@ import { HttpTraceError, httpTraceToBatches } from "../ingest/http-trace.js";
 import type { Roots } from "../core.js";
 import { log } from "../util/log.js";
 
+const gunzipAsync = promisify(zlib.gunzip);
+const inflateAsync = promisify(zlib.inflate);
+const brotliDecompressAsync = promisify(zlib.brotliDecompress);
+
 const MAX_BODY = 64 * 1024 * 1024;
+const MAX_DECOMPRESSED = MAX_BODY * 4;
 
 async function readBody(c: Context): Promise<Buffer> {
-  const raw = Buffer.from(await c.req.arrayBuffer());
-  if (raw.length > MAX_BODY) throw Object.assign(new Error("payload too large"), { status: 413 });
+  const clHeader = c.req.header("content-length");
+  if (clHeader !== undefined) {
+    const cl = Number(clHeader);
+    if (Number.isFinite(cl) && cl > MAX_BODY) {
+      throw Object.assign(new Error("payload too large"), { status: 413 });
+    }
+  }
+  const ab = await c.req.arrayBuffer();
+  if (ab.byteLength > MAX_BODY) {
+    throw Object.assign(new Error("payload too large"), { status: 413 });
+  }
+  const raw = Buffer.from(ab);
   const enc = (c.req.header("content-encoding") ?? "").toLowerCase();
-  if (enc === "gzip" || enc === "x-gzip") return zlib.gunzipSync(raw, { maxOutputLength: MAX_BODY * 4 });
-  if (enc === "deflate") return zlib.inflateSync(raw, { maxOutputLength: MAX_BODY * 4 });
-  if (enc === "br") return zlib.brotliDecompressSync(raw, { maxOutputLength: MAX_BODY * 4 });
+  if (enc === "gzip" || enc === "x-gzip") return gunzipAsync(raw, { maxOutputLength: MAX_DECOMPRESSED });
+  if (enc === "deflate") return inflateAsync(raw, { maxOutputLength: MAX_DECOMPRESSED });
+  if (enc === "br") return brotliDecompressAsync(raw, { maxOutputLength: MAX_DECOMPRESSED });
   // Some exporters gzip without the header; sniff the magic bytes.
-  if (raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b) return zlib.gunzipSync(raw);
+  if (raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b) {
+    return gunzipAsync(raw, { maxOutputLength: MAX_DECOMPRESSED });
+  }
   return raw;
 }
 
@@ -67,7 +85,8 @@ export function mountCollector(app: Hono, roots: Roots): void {
     try {
       parsed = JSON.parse((await readBody(c)).toString("utf8"));
     } catch (err) {
-      return c.json({ error: "Validation error", details: { body: `not JSON: ${(err as Error).message}` } }, 400);
+      const status = (err as { status?: number }).status ?? 400;
+      return c.json({ error: "Validation error", details: { body: `not JSON: ${(err as Error).message}` } }, status as 400);
     }
     try {
       const { batches, traceId, spans } = httpTraceToBatches(parsed);
@@ -86,7 +105,8 @@ export function mountCollector(app: Hono, roots: Roots): void {
       const records = isJson(c) ? decodeLogsJson(JSON.parse(body.toString("utf8"))) : decodeLogsProtobuf(body);
       roots.store.ingestLogs(records);
     } catch (err) {
-      return c.json({ code: 3, message: `invalid OTLP logs payload: ${(err as Error).message}` }, 400);
+      const status = (err as { status?: number }).status ?? 400;
+      return c.json({ code: 3, message: `invalid OTLP logs payload: ${(err as Error).message}` }, status as 400);
     }
     if (isJson(c)) return c.json({ partialSuccess: {} });
     return new Response(new Uint8Array(), { status: 200, headers: { "content-type": "application/x-protobuf" } });
